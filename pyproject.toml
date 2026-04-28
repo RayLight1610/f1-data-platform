@@ -8,5 +8,6 @@ dependencies = [
     "fastf1>=3.8.2",
     "pandas>=2.3.3",
     "psycopg2-binary>=2.9.12",
+    "python-dotenv>=1.2.2",
     "sqlalchemy>=2.0.49",
 ]
