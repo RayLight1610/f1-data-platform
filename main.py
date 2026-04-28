@@ -1,9 +1,3 @@
-from src.f1_platform.db.connection import get_engine
-from sqlalchemy import text
+from src.f1_platform.bronze.ingest_fastf1 import ingest_race_laps
 
-engine = get_engine()
-
-with engine.connect() as conn:
-    result = conn.execute(text("SELECT current_database(), current_user, version();"))
-    for row in result:
-        print(row)
+ingest_race_laps(2026, "Australia", "replace")
