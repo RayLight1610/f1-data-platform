@@ -17,19 +17,19 @@ Build a Data Engineering platform that ingests Formula 1 data from multiple sour
 ## Architecture Overview
 
 ```
-SOURCES                  →  BRONZE         →  SILVER         →  GOLD            →  PRESENTATION
-─────────                   ──────            ──────            ────                ────────────
-FastF1 API                  raw_laps          clean_laps        fact_results        Visualizations
-Ergast API                  raw_results       clean_results     dim_drivers         RAG Chatbot (Phase 2)
-F1 Official site            raw_telemetry     clean_telemetry   agg_standings       ML Predictions (Phase 2)
-Wikipedia (text)            text_docs         embeddings (pgVector — Phase 2)
+SOURCES                  →  BRONZE              →  SILVER         →  GOLD            →  PRESENTATION
+─────────                   ──────                 ──────            ────                ────────────
+FastF1 API ✓                raw_laps ✓             clean_laps        fact_results        Visualizations
+Ergast API                  raw_results ✓          clean_results     dim_drivers         RAG Chatbot (Phase 3)
+F1 Official site            raw_weather ✓          clean_telemetry   agg_standings       ML Predictions (Phase 5)
+Wikipedia (text)            raw_telemetry ✓        embeddings (pgVector — Phase 3)
 ```
 
-**Storage:** PostgreSQL (single instance), with table prefixes per layer:
-- `bronze_*` — raw data, untransformed
-- `silver_*` — cleaned, typed, deduplicated
-- `gold_*` — aggregations, ready for analytics
-- `embeddings_*` — pgVector tables (Phase 2)
+**Storage:** PostgreSQL 18, with separate schemas per Medallion layer:
+- `bronze` — raw data, untransformed (✓ implemented)
+- `silver` — cleaned, typed, deduplicated (next)
+- `gold` — aggregations, ready for analytics
+- `embeddings` — pgVector tables (Phase 3)
 
 ---
 
@@ -41,7 +41,8 @@ Wikipedia (text)            text_docs         embeddings (pgVector — Phase 2)
 |---|---|
 | Python | 3.13+ |
 | Package manager | `uv` 0.11.3 |
-| Database | PostgreSQL (running locally) |
+| Database | PostgreSQL 18 (local) — `f1_data` database |
+| DB users | `postgres` (superuser), `f1_app` (application) |
 | IDE | VS Code |
 | Repository | GitHub `RayLight1610/f1-data-platform` (private) |
 
@@ -49,63 +50,70 @@ Wikipedia (text)            text_docs         embeddings (pgVector — Phase 2)
 
 ```toml
 dependencies = [
-    "fastf1>=3.8.2",        # F1 data extraction
-    "pandas>=2.3.3",        # Data manipulation
+    "fastf1>=3.8.2",            # F1 data extraction
+    "pandas>=2.3.3",            # Data manipulation
     "psycopg2-binary>=2.9.12",  # PostgreSQL driver
-    "sqlalchemy>=2.0.49",   # ORM / DB abstraction
+    "sqlalchemy>=2.0.49",       # DB abstraction layer
+    "python-dotenv>=1.2.2",     # Environment variable management
 ]
 ```
 
-### Files Created So Far
+### Files Created
 
 ```
 f1-data-platform/
-├── .gitignore              # Python + project-specific exclusions
-├── README.md               # Project overview
-├── pyproject.toml          # Project config + dependencies
-├── uv.lock                 # Locked dependency versions
-├── .python-version         # Python version marker
-└── main.py                 # Default entry point (placeholder)
-```
-
----
-
-## Planned Structure
-
-```
-f1-data-platform/
+├── .env                          # DB credentials (gitignored)
 ├── .gitignore
+├── .python-version
 ├── README.md
-├── PROJECT_STRUCTURE.md    # This document
+├── PROJECT_STRUCTURE.md
 ├── pyproject.toml
 ├── uv.lock
-├── main.py                 # Pipeline entry point
-│
-├── config/                 # Configuration (DB conn, paths)
-│   └── settings.py
+├── main.py                       # Pipeline entry point
 │
 ├── src/f1_platform/
-│   ├── bronze/             # Raw data ingestion
-│   │   └── ingest_fastf1.py
-│   ├── silver/             # Cleaned transformations
-│   │   └── transform_laps.py
-│   ├── gold/               # Aggregations
-│   │   └── agg_standings.py
-│   ├── db/                 # Database connection helpers
-│   │   └── connection.py
-│   └── utils/              # Logging, helpers
-│       └── logger.py
-│
-├── sql/                    # SQL DDL + transformations
+│   ├── __init__.py
 │   ├── bronze/
+│   │   ├── __init__.py
+│   │   └── ingest_fastf1.py     # ✓ 4 ingestion functions + season loader
+│   ├── silver/                   # (empty — next phase)
+│   ├── gold/                     # (empty)
+│   ├── db/
+│   │   ├── __init__.py
+│   │   └── connection.py        # ✓ get_engine() with .env support
+│   └── utils/                    # (empty)
+│
+├── sql/
+│   ├── bronze/                   # (empty — schemas created via pgAdmin)
 │   ├── silver/
 │   └── gold/
 │
-├── notebooks/              # Jupyter exploration
-├── tests/                  # Unit tests (pytest)
-├── cache/                  # FastF1 cache (gitignored)
-└── dbt/                    # dbt project (Phase 2)
+├── notebooks/                    # (empty — Jupyter setup pending)
+├── tests/                        # (empty)
+└── cache/                        # FastF1 cached data (gitignored)
 ```
+
+### Bronze Layer — Implemented ✓
+
+**Module:** `src/f1_platform/bronze/ingest_fastf1.py`
+
+**Helper functions:**
+- `load_session(year, event)` — wrapper around FastF1 session loading
+- `add_metadata_columns(df)` — adds `ingested_at` + `source` columns
+- `already_ingested(table, year, event, engine)` — idempotency check
+
+**Ingestion functions (all with idempotency, error handling, logging):**
+- `ingest_race_laps(year, event, mode)` → `bronze.raw_laps`
+- `ingest_race_results(year, event, mode)` → `bronze.raw_results`
+- `ingest_race_weather(year, event, mode)` → `bronze.raw_weather`
+- `ingest_race_telemetry(year, event, mode)` → `bronze.raw_telemetry` (fastest lap only)
+
+**Bulk loader:**
+- `ingest_season(year)` — iterates through full season schedule, calls all 4 ingestions per race, with try/except per event
+
+**Data loaded:**
+- Full 2025 season (24 races)
+- Partial 2026 (Australia, China, Japan)
 
 ---
 
@@ -113,47 +121,46 @@ f1-data-platform/
 
 ### Phase 1 — MVP (Months 1-3)
 
-**Goal:** End-to-end pipeline for one F1 season, demonstrating core DE skills.
-
-| Week | Milestone | Skills Practiced |
+| Status | Milestone | Skills Practiced |
 |---|---|---|
-| 1-2 | Project structure + DB setup + first connection | PostgreSQL, SQLAlchemy, env config |
-| 3-4 | Bronze layer — FastF1 ingestion for one race | Python, API integration, pandas, raw storage |
-| 5-6 | Silver layer — clean transformations | SQL transformations, type casting, foreign keys |
-| 7-8 | Gold layer — aggregations | Star schema, fact/dim tables, window functions |
-| 9-10 | Visualizations — 3-4 key charts | matplotlib/plotly basics |
-| 11-12 | Orchestration + polish | Logging, error handling, single entry point |
+| ✓ | Project structure + DB setup + first connection | PostgreSQL, SQLAlchemy, env config, .gitignore |
+| ✓ | Bronze layer — FastF1 ingestion (4 tables, full season) | Python, API integration, pandas, idempotency, logging |
+| **next** | Jupyter exploration — analyze Bronze data quality | pandas analysis, data profiling |
+| | Silver layer — clean transformations (SQL-first) | SQL transformations, type casting, normalization |
+| | Gold layer — aggregations | Star schema, fact/dim tables, window functions |
+| | Visualizations — 3-4 key charts | matplotlib/plotly basics |
+| | Orchestration + polish | Single entry point, robust logging |
 
-**Phase 1 deliverable:** `python main.py` runs the full pipeline; CSV/visualizations produced; CV-ready GitHub repo.
+**Phase 1 deliverable:** `python main.py` runs the full pipeline; visualizations produced; CV-ready repo.
 
-### Phase 1.5 — Modern DE Tooling (Months 3-4)
+### Phase 2 — Modern DE Tooling (Months 3-4)
 
-| Tool | Purpose | Time Investment |
+| Tool | Purpose | Time |
 |---|---|---|
-| **dbt** | Replace manual SQL transformations with declarative models | 1-2 weeks |
+| **dbt** | Replace manual SQL with declarative models | 1-2 weeks |
 | **Docker** | Containerize the application | 1 week |
 | **pytest + Great Expectations** | Data quality tests | 1 week |
-| **SCD Type 2** | Schema evolution in Silver layer | 1 week |
+| **SCD Type 2** | Schema evolution in Silver | 1 week |
 
-### Phase 2 — Production-Grade (Months 4-6)
-
-| Tool | Purpose |
-|---|---|
-| **Airflow** | Replace `main.py` with proper DAG orchestration |
-| **Cloud** (Supabase / AWS RDS free tier) | Move PostgreSQL to cloud |
-| **CI/CD** | GitHub Actions for tests + deploy |
-
-### Phase 3 — AI Layer (Months 6-9)
+### Phase 3 — AI Layer (Months 4-7)
 
 | Component | Purpose |
 |---|---|
-| **pgVector** | Vector search extension on PostgreSQL |
+| **pgVector** | Vector search extension |
 | **Wikipedia ingestion** | Text data for RAG context |
 | **F1 Analyst chatbot** | RAG agent with LLM |
 
-### Phase 4 — Scale & ML (Months 9-12)
+### Phase 4 — Production-Grade (Months 7-9)
 
-| Component | Purpose |
+| Tool | Purpose |
+|---|---|
+| **Airflow** | Proper DAG orchestration |
+| **Cloud** (Supabase / AWS RDS free tier) | Move PostgreSQL to cloud |
+| **CI/CD** | GitHub Actions for tests + deploy |
+
+### Phase 5 — Scale & ML (Months 9-12)
+
+| Tool | Purpose |
 |---|---|
 | **Databricks Community Edition** | PySpark + Mosaic AI experimentation |
 | **scikit-learn** | Race outcome prediction models |
@@ -175,12 +182,28 @@ f1-data-platform/
 - Imperative mood: "Add Bronze ingestion" not "Added Bronze ingestion"
 - Reference layer when relevant: "Bronze: ingest FastF1 race results"
 
-**Commit checkpoints (recommended):**
-- After folder structure creation
-- After each new dependency added
-- After each working script per layer
+**Commit checkpoints (in practice):**
+- After folder structure creation ✓
+- After each new dependency added ✓
+- After each working script per layer ✓
 - After tests added
-- After documentation updates
+- After documentation updates ✓
+
+---
+
+## Decision Log
+
+| Decision | Rationale |
+|---|---|
+| PostgreSQL over SQL Server | Industry standard for DE; pgVector support; free |
+| `uv` over pip + venv | 10x faster, deterministic locking, modern standard |
+| Single-DB Medallion (separate schemas) vs separate DBs | Simpler for MVP; layer separation via schema prefixes |
+| SQL-first, Python where necessary | Leverage 15 yrs SQL Server experience |
+| Bronze keeps raw column names (PascalCase from FastF1) | Bronze principle: untransformed data; normalization happens in Silver |
+| dbt added to scope | Critical 2026 DE skill, low cost to integrate |
+| Databricks deferred to Phase 5 | Community Edition limited; PostgreSQL sufficient initially |
+| Idempotency check via SELECT before INSERT | Safe re-runs; production-grade pattern |
+| `f1_app` user instead of `postgres` superuser | Security best practice; minimal privileges |
 
 ---
 
@@ -193,17 +216,13 @@ f1-data-platform/
 
 ---
 
-## Decision Log
+## Known Issues / Technical Debt
 
-| Date | Decision | Rationale |
-|---|---|---|
-| Initial | PostgreSQL over SQL Server | Industry standard for DE; pgVector support; free |
-| Initial | `uv` over pip + venv | 10x faster, deterministic locking, modern standard |
-| Initial | Single-DB Medallion vs separate DBs | Simpler for MVP; layer separation via table prefixes |
-| Initial | SQL-first, Python where necessary | Leverage 15 yrs SQL Server experience |
-| Initial | dbt added to scope | Critical 2026 DE skill, low cost to integrate |
-| Initial | Databricks deferred to Phase 4 | Community Edition limited; PostgreSQL sufficient initially |
+- `logging.basicConfig()` should be centralized (currently set in `main.py`)
+- No automated tests yet
+- `cache/` size grows quickly — consider periodic cleanup strategy
+- `if_exists="append"` allows duplicates if idempotency check is bypassed — Silver layer should deduplicate
 
 ---
 
-*Last updated: Project initialization phase*
+*Last updated: After Bronze layer completion (full 2025 season + partial 2026)*
