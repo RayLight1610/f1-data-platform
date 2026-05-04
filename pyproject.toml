@@ -6,8 +6,17 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastf1>=3.8.2",
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
     "pandas>=2.3.3",
     "psycopg2-binary>=2.9.12",
     "python-dotenv>=1.2.2",
     "sqlalchemy>=2.0.49",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/f1_platform"]
