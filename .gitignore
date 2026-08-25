@@ -40,3 +40,6 @@ build/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Claude Code — local overrides only
+.claude/settings.local.json

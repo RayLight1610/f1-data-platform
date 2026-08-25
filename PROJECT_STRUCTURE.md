@@ -20,7 +20,7 @@ Build a Data Engineering platform that ingests Formula 1 data from multiple sour
 SOURCES                  →  BRONZE              →  SILVER         →  GOLD            →  PRESENTATION
 ─────────                   ──────                 ──────            ────                ────────────
 FastF1 API ✓                raw_laps ✓             clean_laps        fact_results        Visualizations
-Ergast API                  raw_results ✓          clean_results     dim_drivers         RAG Chatbot (Phase 3)
+Jolpica-F1 API              raw_results ✓          clean_results     dim_drivers         RAG Chatbot (Phase 3)
 F1 Official site            raw_weather ✓          clean_telemetry   agg_standings       ML Predictions (Phase 5)
 Wikipedia (text)            raw_telemetry ✓        embeddings (pgVector — Phase 3)
 ```
@@ -44,7 +44,7 @@ Wikipedia (text)            raw_telemetry ✓        embeddings (pgVector — Ph
 | Database | PostgreSQL 18 (local) — `f1_data` database |
 | DB users | `postgres` (superuser), `f1_app` (application) |
 | IDE | VS Code |
-| Repository | GitHub `RayLight1610/f1-data-platform` (private) |
+| Repository | GitHub `RayLight1610/f1-data-platform` (public) |
 
 ### Installed Dependencies
 
@@ -84,13 +84,13 @@ f1-data-platform/
 │   └── utils/                    # (empty)
 │
 ├── sql/
-│   ├── bronze/                   # (empty — schemas created via pgAdmin)
+│   ├── bronze/                   
 │   ├── silver/
 │   └── gold/
 │
-├── notebooks/                    # (empty — Jupyter setup pending)
-├── tests/                        # (empty)
-└── cache/                        # FastF1 cached data (gitignored)
+├── notebooks/                    
+├── tests/                        # (not tracked)
+└── cache/                        # FastF1 cached data (not tracked)
 ```
 
 ### Bronze Layer — Implemented ✓
@@ -222,6 +222,9 @@ f1-data-platform/
 - No automated tests yet
 - `cache/` size grows quickly — consider periodic cleanup strategy
 - `if_exists="append"` allows duplicates if idempotency check is bypassed — Silver layer should deduplicate
+- Dev tooling added 2026-08: ruff, pytest, mypy (lenient config; tighten with Silver).
+- FIXED 2026-08: package was imported as both `f1_platform` and `src.f1_platform`.
+  Canonical import is `f1_platform` (src layout, installed via hatchling).
 
 ---
 
