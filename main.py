@@ -32,6 +32,8 @@ logging.basicConfig(
 
 # ingest_race_telemetry(2025, "Australia", "replace")
 
+ingest_season(2024)
+
 ingest_season(2025)
 
 ingest_season(2026)
