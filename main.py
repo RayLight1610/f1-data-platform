@@ -1,37 +1,45 @@
+"""Pipeline entry point.
+
+Examples:
+    uv run python main.py bronze --season 2025
+    uv run python main.py bronze --season 2026 --event "Australia"
+"""
+
+import argparse
 import logging
 
-from f1_platform.bronze.ingest_fastf1 import ingest_season
+from f1_platform.bronze.ingest_fastf1 import (
+    ingest_race_laps,
+    ingest_race_results,
+    ingest_race_telemetry,
+    ingest_race_weather,
+    ingest_season,
+)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ingest_race_laps(2026, "Australia", "replace")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="F1 Data Platform pipeline")
+    parser.add_argument("layer", choices=["bronze"], help="Which layer to run")
+    parser.add_argument("--season", type=int, required=True, help="Season year")
+    parser.add_argument(
+        "--event",
+        help="Single event name. Omit to ingest the whole season.",
+    )
+    args = parser.parse_args()
 
-# ingest_race_laps(2026, "China")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
 
-# ingest_race_laps(2026, "Japan")
+    if args.event:
+        ingest_race_laps(args.season, args.event)
+        ingest_race_results(args.season, args.event)
+        ingest_race_weather(args.season, args.event)
+        ingest_race_telemetry(args.season, args.event)
+    else:
+        ingest_season(args.season)
 
-# ingest_race_results(2026, "Australia", "replace")
 
-# ingest_race_results(2026, "China")
-
-# ingest_race_results(2026, "Japan")
-
-# ingest_race_weather(2026, "Australia", "replace")
-
-# ingest_race_weather(2026, "China")
-
-# ingest_race_weather(2026, "Japan")
-
-# ingest_race_telemetry(2026, "Australia", "replace")
-
-# ingest_race_telemetry(2026, "China")
-
-# ingest_race_telemetry(2026, "Japan")
-
-# ingest_race_telemetry(2025, "Australia", "replace")
-
-ingest_season(2024)
-
-ingest_season(2025)
-
-ingest_season(2026)
+if __name__ == "__main__":
+    main()
