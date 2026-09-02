@@ -5,10 +5,13 @@ Inputs: `docs/VISION.md` (complete), `docs/architecture/discovery-2026-08-25.md`
 `docs/reviews/{bronze-ingest_fastf1,db-connection,main}.md` (all VERDICT: FAIL — binding),
 `CLAUDE.md`, answers to Q1–Q7.
 
-Revision 2 (2026-09-01): human review applied. Nine corrections are marked **[HR-n]**
-in place; the table below indexes them. Four are *unverified assumptions* that must be
-checked against the live database before the dependent code is written — those are
-marked **[VERIFY]** and are blocking.
+Revision 3 (2026-09-01): verification results applied. Twelve corrections are marked
+**[HR-n]** in place; the table below indexes them and records the outcome of each.
+Three of the four blocking `[VERIFY]` items are **RESOLVED** against the live database;
+one (HR-5, cache completeness) is **still open** and blocks Appendix B item 7 only.
+Three new findings (HR-10, HR-11, HR-12) came out of the verification queries and are
+material — HR-10 changes the diagnosis of the duplicate data, HR-11 changes the clean-lap
+rule that G1/G2/G7 depend on.
 
 Scope of this document: **bronze remediation + bronze DDL + silver**. Gold is not designed
 here. The only gold-facing commitment made below is the join key
@@ -23,17 +26,21 @@ fastf1, pandas, sqlalchemy, psycopg2, python-dotenv, ruff, pytest, mypy — all 
 | Ref | What changed | Section |
 |---|---|---|
 | HR-1 | Resume predicate contradicted itself: `IS DISTINCT FROM 'loaded'` would retry `skipped_no_data` forever, which §5.5 explicitly says must not happen. Corrected to `NOT IN ('loaded','skipped_no_data')`. | §4.7, §5.5 |
-| HR-2 | **[VERIFY]** `LapStartDate` was asserted to be naive **UTC**. Unverified. If it is local track time, `AT TIME ZONE 'UTC'` shifts every value silently — the exact failure D-6 exists to prevent. | §4.6 quirk 5, §9 D-6 |
-| HR-3 | **[VERIFY]** `silver.lap.track_status` is `NOT NULL`, but the bronze source column is nullable. One NULL lap aborts the slice. | §4.5 |
-| HR-4 | **[VERIFY]** Bronze PKs and the column contract (G-B7) have only ever been exercised against 2024–2026 data. The 2018–2023 backfill is therefore **iterative, not a single run**, newest season first. | §5.5, Appendix B item 8 |
-| HR-5 | `pg_dump` of the bronze schema added as a mandatory precondition to the irreversible drop-and-reload. | Appendix B item 7 |
+| HR-2 | **RESOLVED — assumption holds.** `LapStartDate` is naive **UTC**. Measured over 26 rows of 2025: clock-hour stddev 4.71, range 04:18–20:03; Australia 04:18 (15:00 AEDT), Bahrain 15:03 (18:00 AST), Miami 20:03 (16:00 EDT), Las Vegas 04:04 (20:00 PST). A local-time column would have clustered at 14:00–16:00. `AT TIME ZONE 'UTC'` stands. | §4.6 quirk 5, §9 D-6 |
+| HR-3 | **RESOLVED — `NOT NULL` is safe.** 61,921 laps: 0 NULL, 0 empty string, 0 `'nan'` in `"TrackStatus"`. Keep the constraint; it is a real invariant. | §4.5 |
+| HR-4 | **[VERIFY — deferred by design]** Bronze PKs and the column contract (G-B7) have only ever been exercised against 2024–2026 data. The 2018–2023 backfill is therefore **iterative, not a single run**, newest season first. Not resolvable without loading old seasons. | §5.5, Appendix B item 8 |
+| HR-5 | **[VERIFY — STILL OPEN]** `pg_dump` added as a mandatory precondition to the irreversible drop-and-reload. The cache-completeness claim behind D-16 remains **unverified**: the first verification script was wrong (it counted files at event level; fastf1 stores them one directory deeper, under the session folder). Corrected script in Appendix B. **Blocks item 7 only.** | Appendix B item 7 |
 | HR-6 | `sql/bronze/ddl_create_schema.sql` already exists; it is superseded by `000_create_schemas.sql`, not duplicated. | Appendix A |
 | HR-7 | Event count corrected from ~185 to ~197 for 2018–2026. Changes no decision. | §4.2, §5.1 |
-| HR-8 | **[VERIFY]** The silver runner reads `.rowcount` after a two-statement script; the returned value is driver-dependent. G-B5 depends on it being the INSERT count. | Appendix A |
+| HR-8 | **RESOLVED — `.rowcount` returns the INSERT count.** Measured: `DELETE` of 3 rows then `INSERT` of 7 in one script returns 7; table holds 7. G-B5 works as designed with psycopg2 + PostgreSQL 18. Keep the mechanism; the §8 integration test remains the regression guard. | Appendix A |
 | HR-9 | `notebooks/*` is already excluded from ruff in `pyproject.toml`; the proposed per-file-ignore is redundant. | §6 |
+| HR-10 | **NEW — the duplicate diagnosis was wrong.** `Pre-Season Testing` does not contain testing data. It is a **byte-identical second copy of the Singapore Grand Prix**, stored under a testing label. Filtering `RoundNumber = 0` prevents recurrence, but the mislabelling implies the season loop resolved a session by position rather than by round. | §4.4, §9 D-16, new §4.8 |
+| HR-11 | **NEW — `TrackStatus` is a concatenation of status codes, not one code.** 25 distinct values observed, e.g. `'12'`, `'124'`, `'671'`. A clean lap is `track_status = '1'` **exactly**; never `LIKE '%1%'`. 90.1% of laps are clean. This is the rule G1, G2 and G7 depend on. | new §4.8 |
+| HR-12 | **NEW —** `IsPersonalBest` is `boolean` in the *current* bronze table, not `text`: pandas coerced it on the first write. The new DDL pins it to `text`, so the quirk-2 expression is correct **after** the rebuild, but it must also tolerate `'nan'`. Expression extended. | §4.6 quirk 2 |
 
-**Verification gate.** The four `[VERIFY]` items are cheap (four queries, one script) and
-must be resolved before Appendix B item 4. Record the outcome of each in this table.
+**Verification gate.** HR-2, HR-3 and HR-8 are resolved; Appendix B items 1–6 and 9 are
+unblocked. HR-5 is still open and blocks item 7 (the irreversible drop). HR-4 resolves
+itself during item 8.
 
 ---
 
@@ -136,7 +143,7 @@ on `(year, round_number, session)` and never on `event_name`.**
 
 - Schemas: `bronze`, `silver`, `gold` (existing) + **`meta`** (new; §9 D-4).
 - Table names singular in silver (`silver.lap`), original-ish in bronze (`bronze.raw_laps`).
-- Constraints named explicitly: `pk_<table>_<cols>`, `fk_<table>_<target>`, `ck_<table>_<rule>`,
+- Constraints named explicitly: `pk_<table>`, `fk_<table>_<target>`, `ck_<table>_<rule>`,
   `ix_<table>_<cols>`.
 - `session` is `varchar(3)` with
   `CHECK (session IN ('R','Q','S','SQ','FP1','FP2','FP3'))`. v1 only ever inserts `'R'`;
@@ -278,7 +285,7 @@ would mean re-running ~197 session loads later.
 | `silver.event` | `(year, round_number, session)` | `raw_event_schedule` × the session set actually loaded | spine; every other silver table FKs here |
 | `silver.session_result` | `(year, round_number, session, driver_number)` | `raw_results` | G3, G4, G7 |
 | `silver.lap` | `(year, round_number, session, driver_number, lap_number)` | `raw_laps` | G1, G2, G5, G6, G7 |
-| `silver.track_status` | `(year, round_number, session, status_index)` | `raw_track_status` | G6 (and the clean-lap rule it gates) |
+| `silver.track_status` | `(year, round_number, session, status_index)` | `raw_track_status` | G6 (and the clean-lap rule it gates — §4.7.1) |
 | `silver.weather` | `(year, round_number, session, sample_index)` | `raw_weather` | G5 |
 | `silver.telemetry_fastest_lap` | `(year, round_number, session, sample_index)` | `raw_telemetry` | G9 → G4 |
 
@@ -314,7 +321,7 @@ CREATE TABLE silver.lap (
     speed_fl                smallint,
     speed_st                smallint,
     position                smallint,
-    track_status            text          NOT NULL,   -- [VERIFY] HR-3, see below
+    track_status            text          NOT NULL,   -- HR-3 verified: 0 NULLs in 61,921 laps
     is_personal_best        boolean,
     is_deleted              boolean       NOT NULL,
     deleted_reason          text,
@@ -333,20 +340,10 @@ CREATE INDEX ix_lap_event_driver ON silver.lap (year, round_number, session, dri
 CREATE INDEX ix_lap_compound     ON silver.lap (compound) WHERE compound IS NOT NULL;
 ```
 
-**[VERIFY] HR-3 — `track_status NOT NULL`.** The bronze source column `"TrackStatus"` is
-nullable. A single NULL lap aborts the whole slice and rolls it back. Verify before writing
-`030_lap.sql`:
-
-```sql
-SELECT count(*) AS null_track_status,
-       count(*) FILTER (WHERE "TrackStatus" = '') AS empty_track_status
-FROM bronze.raw_laps;
-```
-
-- Zero rows ⇒ keep `NOT NULL`; it is a real invariant worth enforcing.
-- Non-zero ⇒ either drop `NOT NULL`, or map NULL/'' to an explicit sentinel such as
-  `'UNKNOWN'` in the transform. Do **not** silently coalesce to `'1'` (track clear) —
-  that would fabricate a clean-lap classification for G1/G2/G7.
+**[HR-3 — RESOLVED] `track_status NOT NULL` is safe.** Measured across all 61,921 laps
+currently in bronze: 0 NULL, 0 empty string, 0 `'nan'`. The constraint stays and is a real
+invariant, not an aspiration. Re-check once after the 2018–2023 backfill; older seasons have
+not been observed. See §4.7 for what the values actually mean.
 
 Note `ck_lap_compound` deliberately allows `NULL` — the profile found 446 rows with a `'nan'`
 string and 57 with `NULL`; both become `NULL` (§4.6). It does **not** allow the string
@@ -362,38 +359,27 @@ exactly one place: the bronze→silver transform SQL. Nowhere else.
 | # | Quirk | Evidence | Silver expression |
 |---|---|---|---|
 | 1 | Timedeltas arrive as `int64` nanoseconds; `NaT` becomes `-9223372036854775808` | 31,872 sentinels in `PitInTime`, 479 in `LapTime` over 30 events | `round(NULLIF("LapTime", -9223372036854775808)::numeric / 1e9, 3) AS lap_time_s` |
-| 2 | `IsPersonalBest` arrives as `object`, not `bool` | dtype `object`, 28 NULLs | `CASE lower(nullif("IsPersonalBest",'')) WHEN 'true' THEN true WHEN 'false' THEN false ELSE NULL END` |
+| 2 | `IsPersonalBest` arrives as `object`, not `bool` — **[HR-12]** | dtype `object`, 28 NULLs | `CASE lower(nullif(nullif("IsPersonalBest",''),'nan')) WHEN 'true' THEN true WHEN 'false' THEN false ELSE NULL END` |
 | 3 | `DriverNumber` arrives as `object` | dtype `object` | `NULLIF("DriverNumber",'')::smallint` — will raise on a non-numeric value, which is the intent: a driver number that is not a number is a schema break, not a data value |
 | 4 (found) | `Compound` contains the *string* `'nan'` | 446 rows | `NULLIF(NULLIF("Compound",'nan'),'')` |
-| 5 (found) | `LapStartDate` is a naive timestamp — **[VERIFY] HR-2: the UTC assumption is unverified** | dtype `datetime64[ns]` | `"LapStartDate" AT TIME ZONE 'UTC'` → `timestamptz`, **conditional on the check below** |
+| 5 (found) | `LapStartDate` is a naive **UTC** timestamp — **[HR-2] verified, see below** | dtype `datetime64[ns]` | `"LapStartDate" AT TIME ZONE 'UTC'` → `timestamptz` |
 
-**[VERIFY] HR-2 — is `LapStartDate` UTC or local track time?** This document asserted UTC
-without checking. The assertion is load-bearing: if the values are local track time, the
-expression above shifts every timestamp in silver by the circuit's UTC offset, silently and
-with no error. That is precisely the class of bug D-6 exists to prevent, arriving from the
-other direction.
+**[HR-2 — RESOLVED] `LapStartDate` is UTC.** The assumption was load-bearing and is now
+measured rather than assumed. Method: a local-time column would cluster every race between
+14:00 and 16:00, because that is when Grands Prix start locally; a UTC column spreads across
+the clock according to each circuit's offset. Over the 26 rows of 2025 in bronze, the
+clock-hour standard deviation is **4.71** and the range is **04:18 to 20:03**. Individually:
 
-Verify before writing `030_lap.sql`:
+| Race | `min(LapStartDate)` | Local start | Offset |
+|---|---|---|---|
+| Australian GP | 04:18 | 15:00 AEDT | UTC+11 ✓ |
+| Bahrain GP | 15:03 | 18:00 AST | UTC+3 ✓ |
+| Miami GP | 20:03 | 16:00 EDT | UTC−4 ✓ |
+| Las Vegas GP | 04:04 | 20:00 PST (prev. day) | UTC−8 ✓ |
 
-```sql
-SELECT year, round_number, min("LapStartDate") AS first_lap_start
-FROM bronze.raw_laps
-WHERE year = 2025 AND round_number IN (1, 7, 22)
-GROUP BY year, round_number
-ORDER BY round_number;
-```
-
-Compare each value with the published start time of that Grand Prix:
-
-- The value is close to the **UTC** start time ⇒ the assumption holds; keep
-  `AT TIME ZONE 'UTC'`.
-- The value is close to the **local** start time ⇒ the assumption is wrong. The correct
-  expression joins the circuit's timezone from `bronze.raw_event_schedule` and applies
-  `AT TIME ZONE <circuit_tz>`, and this table row must be rewritten before any transform is
-  written.
-
-Record the outcome in the HR table at the top of this document. Do not proceed to
-Appendix B item 9 with this unresolved.
+Conclusive. `AT TIME ZONE 'UTC'` is correct, D-6 stands, and no circuit-timezone join is
+needed. Note that `bronze.raw_event_schedule` is still worth having for the round number and
+the testing filter — but not for timezone conversion.
 
 Quirk 3 is a deliberate fail-loud. If 2018 data contains a non-numeric driver number, the
 transform aborts, the slice is rolled back, and the audit row records `failed` — which is
@@ -413,7 +399,112 @@ and it makes the sentinel a single-point-of-truth. The alternative — repeating
 ~12 places across four transform files — is how a `-9223372036854775.808` second lap time
 eventually reaches gold.
 
-### 4.7 `meta.load_audit` — the visible failure status
+### 4.7 Measured properties of the current bronze data
+
+Everything in this section is measured against the 61,921 laps currently in
+`bronze.raw_laps` (2024, 2025, 5×2026). It is recorded here because it changes design
+decisions, and because re-deriving it costs queries someone has already run.
+
+#### 4.7.1 `TrackStatus` is a concatenation, not a code **[HR-11]**
+
+The column holds the **ordered concatenation of every status code that was active during
+that lap**, not a single code. Observed distribution over 61,921 laps:
+
+| Value | Laps | Reading |
+|---|---|---|
+| `1` | 55,815 | clear for the whole lap |
+| `4` | 1,901 | safety car for the whole lap |
+| `12` | 1,552 | clear, then yellow |
+| `41` | 604 | safety car, then clear |
+| `124` | 463 | clear → yellow → safety car |
+| `671` | 306 | VSC deployed → VSC ending → clear |
+| `21`, `126`, `6`, `16`, `24`, `26`, `14`, `167`, `71`, `2`, `67`, `1254`, … | tail | 25 distinct values in total |
+
+Underlying single-character codes: `1` all clear, `2` yellow, `4` safety car, `5` red flag,
+`6` VSC deployed, `7` VSC ending.
+
+**Consequence — the clean-lap rule.** VISION G6 gates G1, G2 and G7, and this is its
+mechanical definition:
+
+```sql
+-- CORRECT: the lap was clear from start to finish
+WHERE track_status = '1'
+
+-- WRONG: matches '12', '124', '41', '1254' — laps that were interrupted
+WHERE track_status LIKE '%1%'
+```
+
+**55,815 of 61,921 laps (90.1%) are fully clean.** The remaining 9.9% is not noise to be
+ignored: G6 asks what safety cars cost, so those laps are the *subject* of one question and
+must be *excluded* from three others. Both uses need the exact string, so silver stores
+`track_status` verbatim and classification lives in gold.
+
+`bronze.raw_track_status` (§4.4) remains necessary despite this column: `raw_laps.TrackStatus`
+says *that* the status changed during a lap, not *when* or for how long. Deployment and
+withdrawal timestamps only exist in the track-status table.
+
+#### 4.7.2 `Pre-Season Testing` is a duplicate race, not testing data **[HR-10]**
+
+The discovery report concluded that a pre-season testing session had been ingested as if it
+were a race. That diagnosis is wrong, and the correct one matters more.
+
+| Year | Row labelled | Laps | Drivers |
+|---|---|---|---|
+| 2024 | `Pre-Season Testing` | 1,177 | 20 |
+| 2024 | `Singapore Grand Prix` | 1,177 | 20 |
+| 2025 | `Pre-Season Testing` | 1,229 | 20 |
+| 2025 | `Singapore Grand Prix` | 1,229 | 20 |
+
+Identical row counts, identical driver counts, and identical
+`min("LapStartDate")` — 2025-10-05 12:03:32.198 for both 2025 rows. `Pre-Season Testing`
+contains the **Singapore Grand Prix**, stored under the wrong label.
+
+Confirm before relying on it:
+
+```sql
+SELECT count(*) AS rows_that_differ
+FROM (
+    SELECT "Driver", "LapNumber", "LapTime", "Compound"
+    FROM bronze.raw_laps WHERE year = 2025 AND event = 'Pre-Season Testing'
+    EXCEPT
+    SELECT "Driver", "LapNumber", "LapTime", "Compound"
+    FROM bronze.raw_laps WHERE year = 2025 AND event = 'Singapore Grand Prix'
+) d;
+```
+
+Zero rows confirms the duplication.
+
+**Why this matters beyond one bad row.** A testing session leaking in is a *filter* problem,
+solved by excluding `RoundNumber = 0`. A race session stored under a testing label is a
+**key-resolution** problem: the season loop bound a label from one source to a session
+resolved from another, and nothing detected the mismatch. `(year, round_number, session)`
+sourced from `get_event_schedule()` (D-1) eliminates the whole class, because the label and
+the session then come from the same row. But the rewritten `ingest_event` must be explicit:
+the round number passed to `fastf1.get_session()` and the round number written to the
+metadata columns must be the **same variable**, not two lookups that happen to agree.
+
+Add to the §8 unit tests: given a stub schedule of three events, assert that the
+`round_number` written to bronze equals the `round_number` used to resolve the session, for
+every event.
+
+#### 4.7.3 Other measured facts
+
+- **Bronze currently holds 56 rows-per-event groups: 53 distinct races + 3 duplicates**
+  (2024 Singapore ×2, 2025 Australia ×2, 2025 Singapore ×2 — where one of each pair carries
+  the wrong label).
+- **Driver counts vary legitimately**: 19 in 2024 Australia, 2024 São Paulo and 2025 Spain
+  (a driver classified with zero recorded laps); 21 in 2026 Australia against 22 elsewhere.
+  This is why silver's contract explicitly does **not** guarantee a lap for every driver in
+  results.
+- **`IsPersonalBest` is `boolean` in the current table**, not `text` — pandas coerced it on
+  the first write, which is exactly the schema-inference problem the new DDL removes. After
+  the rebuild it is `text` and quirk 2 applies. **[HR-12]**
+- **`year` is `bigint` and `ingested_at` is `timestamp without time zone`** in the current
+  table. Both are fixed by the new DDL (`smallint`, `timestamptz`).
+
+---
+
+### 4.8 `meta.load_audit` — the visible failure status
 
 ```sql
 CREATE TABLE meta.load_audit (
@@ -675,6 +766,7 @@ Fixtures live in `tests/fixtures/`. No new dependency.
 | URL construction | password `p@ss:w/ord#1` | round-trips; `render_as_string(hide_password=True)` contains no password |
 | column contract | frame with an extra column / a missing column | extra ⇒ raises (G-B7); missing ⇒ NULL-filled |
 | schedule filtering | 3-row schedule incl. `RoundNumber=0` | testing event excluded (G-B6) |
+| **round-number binding [HR-10]** | stub schedule of 3 events | the `round_number` written to the metadata columns is the *same variable* passed to `get_session()`, for every event — not two lookups that happen to agree. This is the test that would have caught the Singapore-as-Pre-Season-Testing duplication |
 | `ingest_*` functions | **`FakeSession`** — a plain object exposing `.laps`, `.results`, `.weather_data`, `.track_status`, `.laps.pick_fastest()` | correct target table, correct metadata columns, correct row count |
 | empty fastest lap | `FakeSession` whose `pick_fastest()` returns an empty `Laps` | returns `skipped_no_data`, does not raise |
 | exit-code mapping | outcome lists | all-ok⇒0, one-failed⇒1, rate-limit⇒3 |
@@ -689,7 +781,8 @@ second reason to make it, after the API budget.
 | DDL | `sql/bronze/*.sql`, `sql/silver/*.sql` applied to a scratch DB | applies cleanly; re-applying is a no-op |
 | atomicity | a frame engineered to violate `pk_raw_laps` on its last row | table row count unchanged; **no** `load_audit` row written (G-B3) |
 | idempotency | load the golden event twice | row counts identical; `load_audit.row_count` matches `count(*)` (G-B4, G-B5) |
-| quirk handling | **pathological fixture** (below) | no `-9223372036854775808` survives; no `'nan'` compound; `is_personal_best` is boolean-or-null |
+| quirk handling | **pathological fixture** (below) | no `-9223372036854775808` survives; no `'nan'` compound; `is_personal_best` is boolean-or-null, including from the string `'nan'` (HR-12) |
+| **clean-lap rule [HR-11]** | laps with `track_status` in `('1','12','124','41','671')` | exactly one row is classified clean; `LIKE '%1%'` would wrongly return five |
 | silver transform | golden event in bronze | row count matches; every `ck_` constraint holds; FK to `silver.event` satisfied |
 | G-B5 as a query | after any load | `SELECT ... FROM meta.load_audit a JOIN LATERAL (SELECT count(*) …) WHERE a.status='loaded' AND a.row_count <> c` returns zero rows |
 
@@ -699,7 +792,8 @@ rows, 2 result rows, full weather and track status, one telemetry lap. Stored as
 
 **Pathological fixture**: hand-written, ~10 rows, containing every known trap at once —
 all-sentinel timedeltas, `Compound='nan'`, `Compound=NULL`, `IsPersonalBest` as `'True'` /
-`'nan'` / empty, `DriverNumber=''`, `Position=NULL`, a `LapStartDate` at a DST boundary. This
+`'nan'` / empty, `DriverNumber=''`, `Position=NULL`, a `LapStartDate` at a DST boundary, and
+`TrackStatus` values `'1'`, `'12'` and `'671'` so the clean-lap rule is exercised. This
 is the file that stops quirk regressions.
 
 Deliberately **not** tested: live FastF1 network calls (non-deterministic, rate-limited,
@@ -717,7 +811,7 @@ fixtures above cover v1. See §10.
 | D-2 | `meta.load_audit` replaces `already_ingested()` | keep SELECT-then-INSERT; a marker file per event | the SELECT probe is a sequential scan on an unindexed heap, runs 4–6× per event, and cannot distinguish "loaded" from "partially loaded"; the audit row commits in the same transaction as the data, so the two cannot disagree | if a second writer ever exists — then it needs a lease column |
 | D-3 | Delete-slice + insert in one transaction | `INSERT … ON CONFLICT DO UPDATE`; truncate-and-reload; append-only | upsert leaves orphans when the source row set shrinks; truncate has a table-wide blast radius; append duplicates | when a single slice exceeds ~1M rows and the DELETE becomes a vacuum problem |
 | D-4 | New `meta` schema for the audit table | `bronze.load_audit`; `public.load_audit` | silver must read the ledger without importing anything bronze-owned; a control table in a data schema inverts the layer dependency. Cost: one more `CREATE SCHEMA` line | never |
-| D-5 | Two new bronze tables (`raw_event_schedule`, `raw_track_status`) | derive round from the schedule at runtime without storing it; skip track status until gold | the schedule is the only source of the key and of the testing-event filter; track status is a **prerequisite** for G1/G2/G7 clean laps (VISION G6) and is already inside the `session.load()` we pay for — **zero extra API cost**. Skipping it means re-running ~197 loads later | never |
+| D-5 | Two new bronze tables (`raw_event_schedule`, `raw_track_status`) | derive round from the schedule at runtime without storing it; skip track status until gold | the schedule is the only source of the key and of the testing-event filter; track status is a **prerequisite** for G1/G2/G7 clean laps (VISION G6) and is already inside the `session.load()` we pay for — **zero extra API cost**. `raw_laps.TrackStatus` is not a substitute: it records *that* the status changed during a lap (§4.7.1), never when or for how long. Skipping it means re-running ~197 loads later | never |
 | D-6 | Bronze source timestamps stay naive `timestamp`; only `ingested_at` is `timestamptz` | make everything `timestamptz` in bronze | writing a naive Python datetime into a `timestamptz` column makes Postgres interpret it in the **session** `TimeZone` — on a non-UTC workstation that silently shifts every value. Naive→naive round-trips exactly, and silver applies `AT TIME ZONE 'UTC'` explicitly. This is a **named exception** to the CLAUDE.md "all timestamps timestamptz" rule, scoped to bronze source columns only. **[HR-2]** The *silver-side* half of this decision rests on `LapStartDate` actually being UTC, which is unverified — see §4.6 | if bronze is ever loaded by something that supplies aware datetimes; or immediately, if the HR-2 check shows the source is local time |
 | D-7 | Bronze tables get a real PK on the natural key | surrogate id + unique index; no constraint at all | the PK is the last line of defence against the duplicate-row failure that already happened; a PK violation on a 2018 backfill is a *useful* loud failure. Cost: a genuinely duplicated source row aborts the load rather than landing | if a source is found that legitimately emits duplicate natural keys |
 | D-8 | `sample_index` as key component for the three time-series tables | rely on `Time`/`Date` uniqueness | uniqueness of the time column is empirically verified over 30 events of 2025–2026 only, not over 2018–2023; and sample order is itself information. `sample_index` is ingestion metadata, so bronze rules permit it | never |
@@ -728,8 +822,9 @@ fixtures above cover v1. See §10.
 | D-13 | Session loaded once per event, passed into ingest functions | keep four independent loads; a module-level session cache | cuts API traffic 75% against a 200 req/hr ceiling — the single highest-leverage fix in the repo — and is what makes every ingest function unit-testable with a stub | never |
 | D-14 | Exit codes 0/1/2/3; only `main.py` calls `sys.exit` | boolean success flag; always exit 0 | current behaviour is exit 0 when every ingest fails (reviewer BLOCKER); distinguishing "partial failure" from "resumable rate-limit abort" is what makes a retry wrapper possible later at zero cost now | never |
 | D-15 | `--offline` flag wrapping `Cache.offline_mode(True)` | trust that the cache is warm | makes the Q3 reload *provably* free rather than probably free, and gives integration tests a network-proof mode. Verified present in installed fastf1 | never |
-| D-16 | Drop and reload all existing bronze data | migrate in place; archive schema | verified: the cache holds 53 complete race sessions covering everything in scope that is currently in bronze, so the reload costs zero API requests. In-place migration would have to invent `round_number` for `'Australia'` and quarantine `Pre-Season Testing`, and every future backfill would inherit the messy key | n/a — one-time |
+| D-16 | Drop and reload all existing bronze data | migrate in place; archive schema | **[HR-5] the zero-cost premise is not yet verified** — re-check with the corrected script in Appendix B before item 7. The design decision itself is strengthened by HR-10: the bad row is not a stray testing session but a mislabelled copy of a real race, so in-place repair would mean detecting and unpicking a label/session mismatch, not just deleting a row. In-place migration would have to invent `round_number` for `'Australia'` and quarantine `Pre-Season Testing`, and every future backfill would inherit the messy key | n/a — one-time |
 | D-17 | Bronze keeps PascalCase quoted identifiers | snake_case bronze | CLAUDE.md medallion rule: bronze is the raw payload with original column names. Cost: every bronze query needs double quotes, which is genuinely unpleasant — but it makes "did silver rename this?" answerable by inspection | never |
+| D-19 | Clean lap is `track_status = '1'` exactly; classification lives in gold, silver stores the string verbatim | parse the concatenation into flags in silver; store a `is_clean` boolean in silver | the column is an ordered concatenation of every code active during the lap (§4.7.1), so equality is the only correct test and `LIKE '%1%'` is actively wrong. G6 *studies* the interrupted 9.9% while G1/G2/G7 *exclude* them — both need the raw string, and a silver-side boolean would serve one and destroy the other | if a third consumer needs the parsed codes, add a gold dimension, not a silver column |
 | D-18 | No `silver.stint` table | derive stints in silver | `Stint` is already a *source column* in `raw_laps`, so a stint table would be an aggregation, and aggregation is gold's job. `silver.lap` carries `stint_number` and `tyre_life`, which is everything G2/G5/G7 need | when two or more gold models independently recompute identical stint boundaries |
 
 ---
@@ -825,14 +920,16 @@ run_silver(year, round_number, session, only=None) -> list[LoadOutcome]:
     # first failure: transaction rolls back, audit records 'failed', re-raise
 ```
 
-**[VERIFY] HR-8 — `.rowcount` after a two-statement script.** Each transform file contains a
-`DELETE` followed by an `INSERT … SELECT`, executed as one string. What `.rowcount` returns in
-that situation is driver-specific, and G-B5 (`load_audit.row_count` equals the real row count)
-depends on it being the INSERT's count, not the DELETE's. Confirm with a throwaway script
-before item 9, and if it is ambiguous, make it unambiguous rather than clever: append
-`RETURNING 1` to the INSERT and count the returned rows, or issue the two statements as two
-`conn.execute()` calls inside the same transaction. The integration test for G-B5 (§8) is what
-catches this if it is ever got wrong.
+**[HR-8 — RESOLVED] `.rowcount` returns the INSERT's count.** Measured on this stack
+(psycopg2 + PostgreSQL 18): a script that deletes 3 rows and then inserts 7 returns
+`rowcount = 7`, and the table holds 7. G-B5 works as designed and no `RETURNING` clause is
+needed.
+
+Two caveats worth keeping. The behaviour is a property of the driver, not of the SQL
+standard — a move to psycopg3 or asyncpg must re-verify it. And the value is the *last*
+statement's count, so the transform contract (rule 3 below: DELETE then exactly one INSERT,
+in that order) is what makes it meaningful; a file with a trailing `ANALYZE` would silently
+break the audit count. The §8 integration test for G-B5 is the regression guard for both.
 
 It does not know what any file does. It does not import pandas. It has no SQL of its own
 except the audit upsert. That is the entire point: the transformation logic lives in files a
@@ -858,7 +955,7 @@ Ordered by dependency. Q7(a): all bronze remediation lands before any silver cod
 | 4 | Rewrite `bronze.ingest_fastf1`: session passed in, transactional slice load, column contract, `mode` removed, UTC `ingested_at`, empty-fastest-lap guard, lazy cache init | all five remaining bronze BLOCKERs + WARNINGs |
 | 5 | `main.py`: outcome collection, exit codes 0/1/2/3, DB precondition check, `--offline`, `--force` | main BLOCKER |
 | 6 | Unit tests (`FakeSession`, fixtures) | CLAUDE definition of done |
-| 7 | **`pg_dump` the bronze schema first [HR-5]**, then drop it and reload the 53 cached events with `--offline` | D-16 |
+| 7 | **Verify cache completeness [HR-5], `pg_dump` the bronze schema**, then drop it and reload the 53 distinct races with `--offline` | D-16 |
 | 8 | Backfill 2018–2023, one season per run | §5.5 |
 | 9 | `sql/silver/ddl/*` + `transform/*` + runner + integration tests | Q4 |
 | 10 | Update `PROJECT_STRUCTURE.md` — it has 12 documented contradictions with reality | discovery §3 |
@@ -870,6 +967,39 @@ undone. Take the backup first; it costs a minute and a few gigabytes:
 ```powershell
 pg_dump -h localhost -U f1_app -d f1_data -n bronze -Fc -f bronze_pre_rebuild.dump
 ```
+
+**[HR-5 — STILL OPEN] Cache completeness is not yet verified.** The first attempt used a
+script that counted files directly inside each *event* directory and reported every event as
+empty. That script was wrong: fastf1 stores payloads one level deeper, under a per-session
+folder (`cache/<year>/<date>_<Event>/<n>_<Session>/*.ff1pkl`). Counting at event level finds
+nothing by construction. Use this instead, and run it before item 7:
+
+```powershell
+Get-ChildItem cache -Directory | ForEach-Object {
+    $season = $_.Name
+    Get-ChildItem $_.FullName -Directory | ForEach-Object {
+        $files = Get-ChildItem $_.FullName -File -Recurse -ErrorAction SilentlyContinue
+        [PSCustomObject]@{
+            Season = $season
+            Event  = $_.Name
+            Files  = $files.Count
+            MB     = [math]::Round((($files | Measure-Object Length -Sum).Sum / 1MB), 1)
+        }
+    }
+} | Sort-Object Season, Event | Format-Table -AutoSize
+```
+
+Then confirm the total against the 5.6 GB the discovery report claimed:
+
+```powershell
+"{0:N2} GB" -f ((Get-ChildItem cache -Recurse -File |
+    Measure-Object Length -Sum).Sum / 1GB)
+```
+
+**The gate for item 7** is that every `(year, event)` group returned by the duplicate-check
+query in §4.7.2 has a corresponding cache directory containing more than zero files. An event
+present in bronze but absent from the cache is an event whose reload costs API requests, and
+D-16 is priced on the assumption that the reload is free.
 
 Keep the dump until the reload has completed and this query returns no rows:
 
