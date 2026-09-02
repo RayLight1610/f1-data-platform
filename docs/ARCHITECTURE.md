@@ -5,10 +5,11 @@ Inputs: `docs/VISION.md` (complete), `docs/architecture/discovery-2026-08-25.md`
 `docs/reviews/{bronze-ingest_fastf1,db-connection,main}.md` (all VERDICT: FAIL — binding),
 `CLAUDE.md`, answers to Q1–Q7.
 
-Revision 3 (2026-09-01): verification results applied. Twelve corrections are marked
-**[HR-n]** in place; the table below indexes them and records the outcome of each.
-Three of the four blocking `[VERIFY]` items are **RESOLVED** against the live database;
-one (HR-5, cache completeness) is **still open** and blocks Appendix B item 7 only.
+Revision 4 (2026-09-01): all blocking verification is complete. Twelve corrections are
+marked **[HR-n]** in place; the table below indexes them and records the outcome of each.
+**All four blocking `[VERIFY]` items are RESOLVED** against the live database and the local
+cache. HR-4 (schema drift across 2018–2023) remains open by nature and resolves during
+Appendix B item 8.
 Three new findings (HR-10, HR-11, HR-12) came out of the verification queries and are
 material — HR-10 changes the diagnosis of the duplicate data, HR-11 changes the clean-lap
 rule that G1/G2/G7 depend on.
@@ -29,7 +30,7 @@ fastf1, pandas, sqlalchemy, psycopg2, python-dotenv, ruff, pytest, mypy — all 
 | HR-2 | **RESOLVED — assumption holds.** `LapStartDate` is naive **UTC**. Measured over 26 rows of 2025: clock-hour stddev 4.71, range 04:18–20:03; Australia 04:18 (15:00 AEDT), Bahrain 15:03 (18:00 AST), Miami 20:03 (16:00 EDT), Las Vegas 04:04 (20:00 PST). A local-time column would have clustered at 14:00–16:00. `AT TIME ZONE 'UTC'` stands. | §4.6 quirk 5, §9 D-6 |
 | HR-3 | **RESOLVED — `NOT NULL` is safe.** 61,921 laps: 0 NULL, 0 empty string, 0 `'nan'` in `"TrackStatus"`. Keep the constraint; it is a real invariant. | §4.5 |
 | HR-4 | **[VERIFY — deferred by design]** Bronze PKs and the column contract (G-B7) have only ever been exercised against 2024–2026 data. The 2018–2023 backfill is therefore **iterative, not a single run**, newest season first. Not resolvable without loading old seasons. | §5.5, Appendix B item 8 |
-| HR-5 | **[VERIFY — STILL OPEN]** `pg_dump` added as a mandatory precondition to the irreversible drop-and-reload. The cache-completeness claim behind D-16 remains **unverified**: the first verification script was wrong (it counted files at event level; fastf1 stores them one directory deeper, under the session folder). Corrected script in Appendix B. **Blocks item 7 only.** | Appendix B item 7 |
+| HR-5 | **RESOLVED — the reload is provably free.** Cache audit: 2024 has 24/24 events populated, 2025 has 24/24, 2026 has 5/22 (Australia, China, Japan, Miami, Canada) — exactly the five 2026 races present in bronze. Every `(year, event)` group in bronze has a populated cache directory, so D-16's zero-API-cost premise holds. Uniformly 11 files per event; total ~4.6 GB in the season trees (the discovery report's 5.6 GB includes `http_cache.sqlite` at the cache root). `pg_dump` remains a mandatory precondition to the drop regardless. | Appendix B item 7 |
 | HR-6 | `sql/bronze/ddl_create_schema.sql` already exists; it is superseded by `000_create_schemas.sql`, not duplicated. | Appendix A |
 | HR-7 | Event count corrected from ~185 to ~197 for 2018–2026. Changes no decision. | §4.2, §5.1 |
 | HR-8 | **RESOLVED — `.rowcount` returns the INSERT count.** Measured: `DELETE` of 3 rows then `INSERT` of 7 in one script returns 7; table holds 7. G-B5 works as designed with psycopg2 + PostgreSQL 18. Keep the mechanism; the §8 integration test remains the regression guard. | Appendix A |
@@ -38,9 +39,13 @@ fastf1, pandas, sqlalchemy, psycopg2, python-dotenv, ruff, pytest, mypy — all 
 | HR-11 | **NEW — `TrackStatus` is a concatenation of status codes, not one code.** 25 distinct values observed, e.g. `'12'`, `'124'`, `'671'`. A clean lap is `track_status = '1'` **exactly**; never `LIKE '%1%'`. 90.1% of laps are clean. This is the rule G1, G2 and G7 depend on. | new §4.8 |
 | HR-12 | **NEW —** `IsPersonalBest` is `boolean` in the *current* bronze table, not `text`: pandas coerced it on the first write. The new DDL pins it to `text`, so the quirk-2 expression is correct **after** the rebuild, but it must also tolerate `'nan'`. Expression extended. | §4.6 quirk 2 |
 
-**Verification gate.** HR-2, HR-3 and HR-8 are resolved; Appendix B items 1–6 and 9 are
-unblocked. HR-5 is still open and blocks item 7 (the irreversible drop). HR-4 resolves
-itself during item 8.
+**Verification gate — cleared.** HR-2, HR-3, HR-5 and HR-8 are resolved. Every item in
+Appendix B is unblocked. HR-4 resolves itself during item 8 and is an expectation about how
+that item unfolds, not a precondition.
+
+One incidental corroboration of HR-10: **no `Pre-Season Testing` directory exists in the
+cache for any season.** The label appeared in the schedule, but the session actually loaded
+under it was Singapore. Testing data never entered the platform at any point.
 
 ---
 
@@ -168,11 +173,14 @@ on `(year, round_number, session)` and never on `event_name`.**
 **This number drives four decisions**: no partitioning, no `COPY`, no chunking, no
 concurrency. 400k rows across five tables is a laptop-scale problem. See §9 D-11.
 
-Cache: verified 5.6 GB covering **53 complete race sessions** — 2024 (24), 2025 (24),
-2026 (5: Australia, China, Japan, Miami, Canada). 2018–2023 are **absent**; 17 of the 2026
-event directories exist but are empty, including races already run (Monaco 06-07 through
-Dutch 08-23). Backfilling to ~197 events therefore costs ~144 cold session loads and grows the
-cache to roughly **16 GB**. See §5.5.
+Cache: **re-verified [HR-5]** at ~4.6 GB across the season trees, covering **53 complete
+race sessions** — 2024 (24/24), 2025 (24/24), 2026 (5/22: Australia, China, Japan, Miami,
+Canada). Uniformly 11 `.ff1pkl` files per event, averaging ~85 MB. 2018–2023 are **absent**;
+17 of the 2026 event directories exist but hold zero files, including races already run
+(Monaco 06-07 through Abu Dhabi 12-06). Every event currently in bronze has a populated cache
+directory, which is what makes D-16's reload free. Backfilling to ~197 events costs ~144 cold
+session loads and grows the cache to roughly **16 GB** (144 × 85 MB ≈ 12 GB additional).
+See §5.5.
 
 ### 4.3 Bronze — existing four tables
 
@@ -968,11 +976,12 @@ undone. Take the backup first; it costs a minute and a few gigabytes:
 pg_dump -h localhost -U f1_app -d f1_data -n bronze -Fc -f bronze_pre_rebuild.dump
 ```
 
-**[HR-5 — STILL OPEN] Cache completeness is not yet verified.** The first attempt used a
-script that counted files directly inside each *event* directory and reported every event as
-empty. That script was wrong: fastf1 stores payloads one level deeper, under a per-session
-folder (`cache/<year>/<date>_<Event>/<n>_<Session>/*.ff1pkl`). Counting at event level finds
-nothing by construction. Use this instead, and run it before item 7:
+**[HR-5 — RESOLVED] Cache completeness verified.** A first attempt used a script that
+counted files directly inside each *event* directory and reported every event as empty; that
+script was wrong, because fastf1 stores payloads one level deeper, under a per-session folder
+(`cache/<year>/<date>_<Event>/<n>_<Session>/*.ff1pkl`). The corrected audit below returned
+24/24 populated events for 2024, 24/24 for 2025 and 5/22 for 2026 — matching bronze exactly.
+Re-run it before item 7 to confirm nothing has been evicted since:
 
 ```powershell
 Get-ChildItem cache -Directory | ForEach-Object {
@@ -999,7 +1008,8 @@ Then confirm the total against the 5.6 GB the discovery report claimed:
 **The gate for item 7** is that every `(year, event)` group returned by the duplicate-check
 query in §4.7.2 has a corresponding cache directory containing more than zero files. An event
 present in bronze but absent from the cache is an event whose reload costs API requests, and
-D-16 is priced on the assumption that the reload is free.
+D-16 is priced on the assumption that the reload is free. As of 2026-09-01 this gate **passes**:
+53 distinct races in bronze, 53 populated cache directories.
 
 Keep the dump until the reload has completed and this query returns no rows:
 
